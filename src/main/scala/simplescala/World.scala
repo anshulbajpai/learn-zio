@@ -23,13 +23,17 @@ trait World {
     def singleExchange(fromCurrency: String,
                        toCurrency: String,
                        amount: BigDecimal): Future[Unit] =
-      (exchangeRate(fromCurrency, toCurrency, config) map { rate =>
-        tell(s"$fromCurrency to $toCurrency rate = $rate")
-        allExchanges += s"Converted $fromCurrency $amount to $toCurrency at rate $rate"
-        ()
+      (exchangeRate(fromCurrency, toCurrency, config) map {
+        case Right(rate) ⇒
+          tell(s"$fromCurrency to $toCurrency rate = $rate")
+          allExchanges += s"Converted $fromCurrency $amount to $toCurrency at rate $rate"
+          ()
+        case Left(error) ⇒
+          logError(s"Couldn't fetch exchange rate. Error = $error")
+          ()
       }).recoverWith {
         case ex: Exception =>
-          error(s"Couldn't fetch error rate. Error = ${ex.getMessage}")
+          logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}")
           tell(s"Do you want to retry? Enter Y/N.")
           if (safeAsk(identity).toLowerCase == "y")
             singleExchange(fromCurrency, toCurrency, amount)
@@ -64,7 +68,7 @@ trait World {
       }
       .recoverWith {
         case ex: Exception =>
-          warn(
+          logWarn(
             s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}"
           )
           program(config)
@@ -73,7 +77,7 @@ trait World {
 
   def safeAsk[T](convert: String => T): T =
     Try(convert(ask)).fold({ ex =>
-      info(s"User entered wrong input - ${ex.getMessage}")
+      logInfo(s"User entered wrong input - ${ex.getMessage}")
       tell("Wrong input. Please enter again.")
       safeAsk(convert)
     }, identity)
@@ -81,18 +85,28 @@ trait World {
   case class Config()
 
   object CurrencyApi {
+
+    sealed trait Error
+
+    case object WrongCurrency extends Error
+
     def allCurrencies(config: Config): Future[Set[String]] =
-      randomize(Set("USD", "GBP", "INR", "SGD"), "Couldn't fetch currencies")
+      randomizeFuture(
+        Set("USD", "GBP", "INR", "SGD"),
+        "Couldn't fetch currencies"
+      )
 
     def exchangeRate(from: String,
                      to: String,
-                     config: Config): Future[BigDecimal] =
-      randomize(
-        BigDecimal(Random.nextInt(10000)) / 100,
-        "Couldn't fetch exchange rate"
-      )
+                     config: Config): Future[Either[Error, BigDecimal]] =
+      if (from == "SGD") Future.successful(Left(WrongCurrency))
+      else
+        randomizeFuture(
+          Right(BigDecimal(Random.nextInt(10000)) / 100),
+          "Couldn't fetch exchange rate"
+        )
 
-    private def randomize[A](output: => A, error: => String) =
+    private def randomizeFuture[A](output: => A, error: => String) =
       if (Random.nextBoolean()) Future.successful(output)
       else Future.failed(new RuntimeException(error))
   }
@@ -104,11 +118,11 @@ trait World {
   }
 
   object Logging {
-    def info(msg: String): Unit = tell(s"Info -  $msg")
+    def logInfo(msg: String): Unit = tell(s"Info -  $msg")
 
-    def error(msg: String): Unit = tell(s"Error -  $msg")
+    def logError(msg: String): Unit = tell(s"Error -  $msg")
 
-    def warn(msg: String): Unit = tell(s"Warn -  $msg")
+    def logWarn(msg: String): Unit = tell(s"Warn -  $msg")
   }
 
 }
