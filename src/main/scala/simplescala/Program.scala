@@ -6,17 +6,14 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future}
 import scala.util.{Random, Try}
 
-object Program extends App with World {
+object Program extends App {
   Await.result(program(Config()), Duration.Inf)
-}
-
-trait World {
 
   import Console._
   import CurrencyApi._
   import Logging._
 
-  def program(config: Config): Future[Unit] = {
+  private def program(config: Config): Future[Unit] = {
 
     val allExchanges = mutable.Buffer[String]()
 
@@ -75,16 +72,16 @@ trait World {
       }
   }
 
-  def safeAsk[T](convert: String => T): T =
+  private def safeAsk[T](convert: String => T): T =
     Try(convert(ask)).fold({ ex =>
       logInfo(s"User entered wrong input - ${ex.getMessage}")
       tell("Wrong input. Please enter again.")
       safeAsk(convert)
     }, identity)
 
-  case class Config()
+  private case class Config()
 
-  object CurrencyApi {
+  private object CurrencyApi {
 
     sealed trait Error
 
@@ -111,13 +108,13 @@ trait World {
       else Future.failed(new RuntimeException(error))
   }
 
-  object Console {
+  private object Console {
     def tell(statement: String): Unit = println(statement)
 
     def ask: String = scala.io.StdIn.readLine()
   }
 
-  object Logging {
+  private object Logging {
     def logInfo(msg: String): Unit = tell(s"Info -  $msg")
 
     def logError(msg: String): Unit = tell(s"Error -  $msg")
