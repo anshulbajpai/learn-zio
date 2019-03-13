@@ -5,8 +5,6 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / organization := "com.example"
 ThisBuild / organizationName := "example"
 
-scalacOptions += "-Ypartial-unification"
-
 resolvers += Resolver.sonatypeRepo("releases")
 
 addCompilerPlugin("org.spire-math" %% "kind-projector" % "0.9.9")
@@ -16,6 +14,17 @@ lazy val root = (project in file("."))
     name := "learn-zio",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-core" % "1.6.0",
+      "org.typelevel" %% "cats-effect" % "1.0.0",
       scalaTest % Test
     )
   )
+
+
+scalacOptions ++= Seq(
+  "-feature",
+  "-deprecation",
+  "-unchecked",
+  "-language:postfixOps",
+  "-language:higherKinds",
+  "-Ypartial-unification")
+
