@@ -26,7 +26,7 @@ object Program extends App {
       _ <- tell(s"${transactionRequest.fromCurrency} to ${transactionRequest.toCurrency} rate = $rate")
       exchanges <- addExchange(s"Converted ${transactionRequest.fromCurrency} ${transactionRequest.amount} to ${transactionRequest.toCurrency} at rate $rate")
     } yield exchanges).handleErrorWith { error =>
-      logError(s"Couldn't fetch exchange rate. Error = $error") *> IO.pure(State.empty[List[String], Unit])
+      logError(s"Couldn't fetch exchange rate. Error = $error") *> IO.pure(noExchanges)
     }
 
     def handleTransaction(transactionRequest: TransactionRequest): FromConfig[Exchanges[Unit]] =
@@ -37,11 +37,11 @@ object Program extends App {
         } yield exchanges
       }.handleErrorWith { ex: Throwable =>
         val askForRetry = logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}") *>
-          tell(s"Do you want to retry? Enter Y/N.") >>
+          tell(s"Do you want to retry? Enter Y/N.") *>
           safeAsk(_.toLowerCase == "y")
         for {
           canRetry <- askForRetry.toConfigReader
-          result <- if (canRetry) handleTransaction(transactionRequest) else IO.pure(State.empty[List[String], Unit]).toConfigReader
+          result <- if (canRetry) handleTransaction(transactionRequest) else IO.pure(noExchanges).toConfigReader
         } yield result
       }
 
@@ -63,14 +63,14 @@ object Program extends App {
     }
 
     def conversions(currencyIdMap: Map[Int, String])(oldExchanges: Exchanges[Unit]): FromConfig[Unit] = convert(currencyIdMap)
-      .map(newExchanges => oldExchanges >> newExchanges)
-      .mapF(exchangesIO => exchangesIO.flatMap(exchanges => tell(exchanges.runEmptyS.value.mkString("\n")) >> IO.pure(exchanges)))
+      .map(newExchanges => oldExchanges *> newExchanges)
+      .mapF(exchangesIO => exchangesIO.flatMap(exchanges => tell(exchanges.runEmptyS.value.mkString("\n")) *> IO.pure(exchanges)))
       .flatMap(conversions(currencyIdMap))
 
     allCurrencies.mapF(_.toIO)
       .flatMap { currencies =>
         val currencyIdMap = currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap
-        conversions(currencyIdMap)(State.empty[List[String], Unit])
+        conversions(currencyIdMap)(noExchanges)
       }
       .handleErrorWith {
         case ex: Exception =>
@@ -86,6 +86,8 @@ object Program extends App {
     val toIO: IO[A] = IO.fromFuture(IO(target))
   }
 
+  private def noExchanges = State.empty[List[String], Unit]
+
   private def addExchange(exchangeMessage: String): IO[Exchanges[Unit]] = IO.pure(State(current => (current :+ exchangeMessage, Unit)))
 
   private def safeAsk[T](convert: String => T): IO[T] =
@@ -94,7 +96,7 @@ object Program extends App {
       converted <- IO.fromEither(Try(convert(value)).toEither)
     } yield converted).handleErrorWith { ex: Throwable =>
       logInfo(s"User entered wrong input - ${ex.getMessage}") *>
-        tell("Wrong input. Please enter again.") >>
+        tell("Wrong input. Please enter again.") *>
         safeAsk(convert)
     }
 
