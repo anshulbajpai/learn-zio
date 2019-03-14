@@ -2,10 +2,7 @@ package usingIO
 
 import cats.data._
 import cats.effect.IO
-import cats.instances.all._
-import cats.syntax.applicativeError._
-import cats.syntax.either._
-import cats.syntax.flatMap._
+import cats.implicits._
 
 import scala.concurrent.Future
 import scala.util.{Random, Try}
@@ -29,7 +26,7 @@ object Program extends App {
       _ <- tell(s"${transactionRequest.fromCurrency} to ${transactionRequest.toCurrency} rate = $rate")
       exchanges <- addExchange(s"Converted ${transactionRequest.fromCurrency} ${transactionRequest.amount} to ${transactionRequest.toCurrency} at rate $rate")
     } yield exchanges).handleErrorWith { error =>
-      logError(s"Couldn't fetch exchange rate. Error = $error") >> IO.pure(State.empty[List[String], Unit])
+      logError(s"Couldn't fetch exchange rate. Error = $error") *> IO.pure(State.empty[List[String], Unit])
     }
 
     def handleTransaction(transactionRequest: TransactionRequest): FromConfig[Exchanges[Unit]] =
@@ -39,7 +36,7 @@ object Program extends App {
           exchanges <- createExchange(transactionRequest, errorOrRate)
         } yield exchanges
       }.handleErrorWith { ex: Throwable =>
-        val askForRetry = logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}") >>
+        val askForRetry = logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}") *>
           tell(s"Do you want to retry? Enter Y/N.") >>
           safeAsk(_.toLowerCase == "y")
         for {
@@ -66,8 +63,8 @@ object Program extends App {
     }
 
     def conversions(currencyIdMap: Map[Int, String])(oldExchanges: Exchanges[Unit]): FromConfig[Unit] = convert(currencyIdMap)
-      .map(oldExchanges >> _)
-      .mapF(exchangesIO => exchangesIO.flatMap(exchanges => tell(exchanges.runEmptyS.value.mkString("\n"))) >> exchangesIO)
+      .map(newExchanges => oldExchanges >> newExchanges)
+      .mapF(exchangesIO => exchangesIO.flatMap(exchanges => tell(exchanges.runEmptyS.value.mkString("\n")) >> IO.pure(exchanges)))
       .flatMap(conversions(currencyIdMap))
 
     allCurrencies.mapF(_.toIO)
@@ -77,7 +74,7 @@ object Program extends App {
       }
       .handleErrorWith {
         case ex: Exception =>
-          logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}").toConfigReader >> program
+          logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}").toConfigReader *> program
       }
   }
 
@@ -96,7 +93,7 @@ object Program extends App {
       value <- ask
       converted <- IO.fromEither(Try(convert(value)).toEither)
     } yield converted).handleErrorWith { ex: Throwable =>
-      logInfo(s"User entered wrong input - ${ex.getMessage}") >>
+      logInfo(s"User entered wrong input - ${ex.getMessage}") *>
         tell("Wrong input. Please enter again.") >>
         safeAsk(convert)
     }
