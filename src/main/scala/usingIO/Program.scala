@@ -44,11 +44,11 @@ object Program extends App {
           safeAsk(_.toLowerCase == "y"))
         for {
           canRetry <- askForRetry
-          result <- if (canRetry) handleTransaction(transactionRequest) else ioToConfigReader(emptyExchanges)
+          result <- if (canRetry) handleTransaction(transactionRequest) else ioToConfigReader(IO.pure(State.empty[List[String], Unit]))
         } yield result
       }
 
-    def exchangeLoop(currencyIdMap: Map[Int, String])(oldExchanges: Exchanges[Unit]): FromConfig[Unit] = {
+    def convert(currencyIdMap: Map[Int, String]): FromConfig[Exchanges[Unit]] = {
       val currencyIdsFormatted = currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",")
 
       val transactionRequest = for {
@@ -62,19 +62,18 @@ object Program extends App {
         _ <- tell(s"You chose $toCurrency")
       } yield TransactionRequest(fromCurrency, toCurrency, amount)
 
-      (ioToConfigReader(transactionRequest) >>= handleTransaction).mapF { exchangesIO =>
-        for {
-          exchanges <- exchangesIO
-          newExchanges = oldExchanges >> exchanges
-          _ <- tell(newExchanges.runEmptyS.value.mkString("\n"))
-        } yield newExchanges
-      } >>= exchangeLoop(currencyIdMap)
+      ioToConfigReader(transactionRequest) >>= handleTransaction
     }
+
+    def conversions(currencyIdMap: Map[Int, String])(oldExchanges: Exchanges[Unit]): FromConfig[Unit] = convert(currencyIdMap)
+      .map(oldExchanges >> _)
+      .mapF(exchangesIO => exchangesIO.flatMap(exchanges => tell(exchanges.runEmptyS.value.mkString("\n"))) >> exchangesIO)
+      .flatMap(conversions(currencyIdMap))
 
     allCurrencies.mapF(futureToIo(_))
       .flatMap { currencies =>
         val currencyIdMap = currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap
-        exchangeLoop(currencyIdMap)(State.empty[List[String], Unit])
+        conversions(currencyIdMap)(State.empty[List[String], Unit])
       }
       .handleErrorWith {
         case ex: Exception =>
@@ -87,8 +86,6 @@ object Program extends App {
   private def futureToIo[A](f: => Future[A]): IO[A] = IO.fromFuture(IO(f))
 
   private def addExchange(exchangeMessage: String): IO[Exchanges[Unit]] = IO.pure(State(current => (current :+ exchangeMessage, Unit)))
-
-  private def emptyExchanges = IO.pure(State.empty[List[String], Unit])
 
   private def safeAsk[T](convert: String => T): IO[T] =
     (for {
