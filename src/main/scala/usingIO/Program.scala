@@ -33,18 +33,18 @@ object Program extends App {
     }
 
     def handleTransaction(transactionRequest: TransactionRequest): FromConfig[Exchanges[Unit]] =
-      exchangeRate(transactionRequest.fromCurrency, transactionRequest.toCurrency).mapF(futureToIo(_)).mapF { errorOrRateIO =>
+      exchangeRate(transactionRequest.fromCurrency, transactionRequest.toCurrency).mapF(_.toIO).mapF { errorOrRateIO =>
         for {
           errorOrRate <- errorOrRateIO
           exchanges <- createExchange(transactionRequest, errorOrRate)
         } yield exchanges
       }.handleErrorWith { ex: Throwable =>
-        val askForRetry = ioToConfigReader(logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}") >>
+        val askForRetry = logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}") >>
           tell(s"Do you want to retry? Enter Y/N.") >>
-          safeAsk(_.toLowerCase == "y"))
+          safeAsk(_.toLowerCase == "y")
         for {
-          canRetry <- askForRetry
-          result <- if (canRetry) handleTransaction(transactionRequest) else ioToConfigReader(IO.pure(State.empty[List[String], Unit]))
+          canRetry <- askForRetry.toConfigReader
+          result <- if (canRetry) handleTransaction(transactionRequest) else IO.pure(State.empty[List[String], Unit]).toConfigReader
         } yield result
       }
 
@@ -62,7 +62,7 @@ object Program extends App {
         _ <- tell(s"You chose $toCurrency")
       } yield TransactionRequest(fromCurrency, toCurrency, amount)
 
-      ioToConfigReader(transactionRequest) >>= handleTransaction
+      transactionRequest.toConfigReader >>= handleTransaction
     }
 
     def conversions(currencyIdMap: Map[Int, String])(oldExchanges: Exchanges[Unit]): FromConfig[Unit] = convert(currencyIdMap)
@@ -70,20 +70,24 @@ object Program extends App {
       .mapF(exchangesIO => exchangesIO.flatMap(exchanges => tell(exchanges.runEmptyS.value.mkString("\n"))) >> exchangesIO)
       .flatMap(conversions(currencyIdMap))
 
-    allCurrencies.mapF(futureToIo(_))
+    allCurrencies.mapF(_.toIO)
       .flatMap { currencies =>
         val currencyIdMap = currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap
         conversions(currencyIdMap)(State.empty[List[String], Unit])
       }
       .handleErrorWith {
         case ex: Exception =>
-          ioToConfigReader(logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}")) >> program
+          logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}").toConfigReader >> program
       }
   }
 
-  private def ioToConfigReader[A](io: IO[A]): FromConfig[A] = ReaderT(_ => io)
+  private implicit class IOOps[A](target: IO[A]) {
+    val toConfigReader: FromConfig[A] = ReaderT(_ => target)
+  }
 
-  private def futureToIo[A](f: => Future[A]): IO[A] = IO.fromFuture(IO(f))
+  private implicit class FutureOps[A](target: Future[A]) {
+    val toIO: IO[A] = IO.fromFuture(IO(target))
+  }
 
   private def addExchange(exchangeMessage: String): IO[Exchanges[Unit]] = IO.pure(State(current => (current :+ exchangeMessage, Unit)))
 
