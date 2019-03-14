@@ -7,12 +7,11 @@ import cats.syntax.applicativeError._
 import cats.syntax.either._
 import cats.syntax.flatMap._
 
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Future}
+import scala.concurrent.Future
 import scala.util.{Random, Try}
 
 object Program extends App {
-  Await.result(program.run(Config()).unsafeToFuture(), Duration.Inf)
+  program.run(Config()).unsafeRunAsyncAndForget()
 
   import Console._
   import CurrencyApi._
@@ -21,7 +20,7 @@ object Program extends App {
   private type Exchanges[A] = State[List[String], A]
   private type FromConfig[A] = ReaderT[IO, Config, A]
 
-  private def program: FromConfig[Unit] = {
+  private lazy val program: FromConfig[Unit] = {
 
     case class TransactionRequest(fromCurrency: String, toCurrency: String, amount: BigDecimal)
 
