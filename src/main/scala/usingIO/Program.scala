@@ -37,7 +37,7 @@ object Program extends App {
         } yield exchanges
       }.handleErrorWith { ex: Throwable =>
         val askForRetry = logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}") *>
-          tell(s"Do you want to retry? Enter Y/N.") *>
+          tell("Do you want to retry? Enter y/n.") *>
           safeAsk(_.toLowerCase == "y")
         for {
           canRetry <- askForRetry.toConfigReader
