@@ -16,19 +16,21 @@ object Application extends App with Program {
   import cats.implicits._
   import cats.mtl.instances.all._
 
+  type ConfigedIO[A] = ReaderT[IO, Config, A]
   type Effect1[A] = StateT[IO, List[Transaction], A]
   type Effect[A] = ReaderT[Effect1, Config, A]
 
   program[Effect].run(Config()).runEmptyS.unsafeRunAsyncAndForget()
 
-  private implicit def consoleEffect(implicit consoleIO: Console[IO]): Application.Console[Effect] = new Console[Effect] {
-    override def tell(statement: String): Effect[Unit] = consoleIO.tell(statement).to[Effect]
-    override def ask: Effect[String] = consoleIO.ask.to[Effect]
+  private implicit def effectConsole(implicit ioConsole: Console[IO]): Application.Console[Effect] = new Console[Effect] {
+    override def tell(statement: String): Effect[Unit] = ioConsole.tell(statement).to[Effect]
+    override def ask: Effect[String] = ioConsole.ask.to[Effect]
   }
 
-  private implicit def apiEffect(implicit apiIO: CurrencyApiF[IO]): Application.CurrencyApiF[Effect] = new CurrencyApiF[Effect] {
-    override def allCurrencies(config: Config): Effect[Set[String]] = apiIO.allCurrencies(config).to[Effect]
-    override def exchangeRate(from: String, to: String)(config: Config): Effect[ErrorOr[BigDecimal]] = apiIO.exchangeRate(from, to)(config).to[Effect]
+  private implicit def effectApi(implicit ioApi: CurrencyApiF[ConfigedIO]): Application.CurrencyApiF[Effect] = new CurrencyApiF[Effect] {
+    override def allCurrencies: Effect[Set[String]] = ioApi.allCurrencies.mapF(wrapIOInState)
+    override def exchangeRate(from: String, to: String): Effect[ErrorOr[BigDecimal]] = ioApi.exchangeRate(from, to).mapF(wrapIOInState)
+    private def wrapIOInState[A, B](io: IO[A]): StateT[IO, B, A] = StateT(s => io.map(a => (s, a)))
   }
 
   private implicit def consoleLoggingEffect(implicit consoleLoggingIO: ConsoleLogging[IO]): Application.ConsoleLogging[Effect] = new ConsoleLogging[Effect]()
@@ -38,9 +40,9 @@ object Application extends App with Program {
     override def ask: IO[String] = IO(scala.io.StdIn.readLine())
   }
 
-  private implicit lazy val ioApi: Application.CurrencyApiF[IO] = new CurrencyApiF[IO] {
-    override def allCurrencies(config: Config): IO[Set[String]] = IO.fromFuture(IO(CurrencyApi.allCurrencies(config)))
-    override def exchangeRate(from: String, to: String)(config: Config): IO[ErrorOr[BigDecimal]] = IO.fromFuture(IO(CurrencyApi.exchangeRate(from, to)(config)))
+  private implicit lazy val ioApi: Application.CurrencyApiF[ConfigedIO] = new CurrencyApiF[ConfigedIO] {
+    override def allCurrencies = ReaderT(config => IO.fromFuture(IO(CurrencyApi.allCurrencies(config))))
+    override def exchangeRate(from: String, to: String) = ReaderT(config => IO.fromFuture(IO(CurrencyApi.exchangeRate(from, to)(config))))
   }
 
   private implicit lazy val ioConsoleLogging: Application.ConsoleLogging[IO] = new ConsoleLogging[IO]
@@ -52,19 +54,18 @@ trait Program extends Algebra {
   import cats.syntax.applicativeError._
   import cats.syntax.apply._
   import cats.syntax.flatMap._
-  import cats.syntax.option._
   import cats.syntax.functor._
+  import cats.syntax.option._
 
   def program[F[_] : ConfigAsk : CurrencyApiF : Console : ThrowableMonad : ExchangeState : ConsoleLogging]: F[Unit] = for {
-    config <- config[F]
-    currencies <- currencies(config)
+    currencies <- currencies
     currencyIdMap <- currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap.pure[F]
-    _ <- transaction(currencyIdMap, config).handleErrorWith(handleTransactionError(_)).foreverM[Unit]
+    _ <- transaction(currencyIdMap).handleErrorWith(handleTransactionError(_)).foreverM[Unit]
   } yield ()
 
-  private def handleTransactionError[F[_]: ConsoleLogging](ex: Throwable): F[Unit] = ConsoleLogging[F].logError(ex.getMessage)
+  private def handleTransactionError[F[_] : ConsoleLogging](ex: Throwable): F[Unit] = ConsoleLogging[F].logError(ex.getMessage)
 
-  private def transaction[F[_] : CurrencyApiF : Console : ThrowableMonad : ConsoleLogging : ExchangeState](currencyIdMap: Map[Int, String], config: Config): F[Unit] = for {
+  private def transaction[F[_] : CurrencyApiF : Console : ThrowableMonad : ConsoleLogging : ExchangeState](currencyIdMap: Map[Int, String]): F[Unit] = for {
     currencyIdsFormatted <- currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",").pure[F]
     _ <- Console[F].tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
     fromCurrency <- safeAsk(value => currencyIdMap(value.toInt))
@@ -74,14 +75,14 @@ trait Program extends Algebra {
     _ <- Console[F].tell(s"Choose a currency want to convert to - $currencyIdsFormatted")
     toCurrency <- safeAsk(value => currencyIdMap(value.toInt))
     _ <- Console[F].tell(s"You chose $toCurrency")
-    rateOpt <- rate(fromCurrency, toCurrency)(config)
+    rateOpt <- rate(fromCurrency, toCurrency)
     _ <- rateOpt.map(rate => handleTransaction(Transaction(fromCurrency, toCurrency, amount, rate))).getOrElse(().pure[F])
   } yield ()
 
   private def rate[F[_] : CurrencyApiF : ConsoleLogging : Console]
-  (fromCurrency: String, toCurrency: String)(config: Config)
+  (fromCurrency: String, toCurrency: String)
   (implicit throwableMonad: ThrowableMonad[F]): F[Option[BigDecimal]] = {
-    userRetry(CurrencyApiF[F].exchangeRate(fromCurrency, toCurrency)(config)).flatMap {
+    userRetry(CurrencyApiF[F].exchangeRate(fromCurrency, toCurrency)).flatMap {
       case Some(Right(rate)) => rate.some.pure[F]
       case Some(Left(error)) => throwableMonad.raiseError(new RuntimeException(s"Couldn't fetch exchange rate. Error = $error"))
       case None => none[BigDecimal].pure[F]
@@ -95,10 +96,10 @@ trait Program extends Algebra {
     _ <- Console[F].tell(exchanges.map(Show[Transaction].show).mkString("\n"))
   } yield ()
 
-  private def currencies[F[_] : CurrencyApiF : ThrowableMonad : ConsoleLogging](config: Config): F[Set[String]] =
-    CurrencyApiF[F].allCurrencies(config)
+  private def currencies[F[_] : CurrencyApiF : ThrowableMonad : ConsoleLogging]: F[Set[String]] =
+    CurrencyApiF[F].allCurrencies
       .handleErrorWith { ex =>
-        ConsoleLogging[F].logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}") *> currencies(config)
+        ConsoleLogging[F].logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}") *> currencies
       }
 }
 
@@ -147,8 +148,8 @@ trait Algebra {
   }
 
   trait CurrencyApiF[F[_]] {
-    def allCurrencies(config: Config): F[Set[String]]
-    def exchangeRate(from: String, to: String)(config: Config): F[ErrorOr[BigDecimal]]
+    def allCurrencies: F[Set[String]]
+    def exchangeRate(from: String, to: String): F[ErrorOr[BigDecimal]]
   }
 
   object CurrencyApiF {
