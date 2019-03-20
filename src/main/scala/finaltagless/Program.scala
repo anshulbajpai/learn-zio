@@ -2,7 +2,7 @@ package finaltagless
 
 import cats.data.{ReaderT, StateT}
 import cats.mtl.{ApplicativeAsk, MonadState}
-import cats.{Monad, MonadError}
+import cats.{Monad, MonadError, Show}
 import finaltagless.Fixed.{Config, CurrencyApi}
 
 import scala.concurrent.Future
@@ -15,7 +15,7 @@ object Application extends App with Program {
   import cats.implicits._
   import cats.mtl.instances.all._
 
-  type Effect1[A] = StateT[IO, List[String], A]
+  type Effect1[A] = StateT[IO, List[Transaction], A]
   type Effect[A] = ReaderT[Effect1, Config, A]
 
   program[Effect].run(Config()).runEmptyS.unsafeRunAsyncAndForget()
@@ -71,11 +71,11 @@ trait Program extends Algebra {
   } yield ()
 
 
-  private def handleTransaction[F[_]: Console: ExchangeState: Monad](transaction: Transaction): F[Unit] = for {
+  private def handleTransaction[F[_] : Console : ExchangeState : Monad](transaction: Transaction): F[Unit] = for {
     _ <- Console[F].tell(s"${transaction.fromCurrency} to ${transaction.toCurrency} rate = ${transaction.rate}")
-    _ <- addExchange(s"Converted ${transaction.fromCurrency} ${transaction.amount} to ${transaction.toCurrency} at rate ${transaction.rate}")
+    _ <- addExchange(transaction)
     exchanges <- allExchanges
-    _ <- Console[F].tell(exchanges.mkString("\n"))
+    _ <- Console[F].tell(exchanges.map(Show[Transaction].show).mkString("\n"))
   } yield ()
 
   private def currencies[F[_] : CurrencyApiF : ThrowableMonad : ConsoleLogging](config: Config): F[Set[String]] =
@@ -83,9 +83,6 @@ trait Program extends Algebra {
       .handleErrorWith { ex =>
         ConsoleLogging[F].logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}") *> currencies(config)
       }
-
-  case  class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
-
 }
 
 trait Algebra {
@@ -97,12 +94,19 @@ trait Algebra {
   import cats.syntax.functor._
   import cats.syntax.option._
 
+  case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
+
+  implicit val showTransaction: Show[Transaction] = new Show[Transaction] {
+    override def show(transaction: Transaction): String =
+      s"Converted ${transaction.fromCurrency} ${transaction.amount} to ${transaction.toCurrency} at rate ${transaction.rate}"
+  }
+
   def config[F[_] : ConfigAsk]: F[Config] = ApplicativeAsk[F, Config].reader(identity)
 
-  def addExchange[F[_] : ExchangeState](exchange: String): F[Unit] = MonadState[F, List[String]].modify(_ :+ exchange)
-  def allExchanges[F[_] : ExchangeState]: F[List[String]] = MonadState[F, List[String]].inspect(identity)
+  def addExchange[F[_] : ExchangeState](exchange: Transaction): F[Unit] = MonadState[F, List[Transaction]].modify(_ :+ exchange)
+  def allExchanges[F[_] : ExchangeState]: F[List[Transaction]] = MonadState[F, List[Transaction]].inspect(identity)
 
-  type ExchangeState[F[_]] = MonadState[F, List[String]]
+  type ExchangeState[F[_]] = MonadState[F, List[Transaction]]
   type ConfigAsk[F[_]] = ApplicativeAsk[F, Config]
 
   type ThrowableMonad[F[_]] = MonadError[F, Throwable]
