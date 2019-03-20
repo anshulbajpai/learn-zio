@@ -1,43 +1,43 @@
 package simplescala
 
-import scala.collection.mutable
+import core.Fixed.Config
+
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future}
-import scala.util.{Random, Try}
+import scala.util.Try
 
-object Program extends App {
-  Await.result(program(Config()), Duration.Inf)
+trait Program extends Algebra {
 
   import Console._
-  import CurrencyApi._
   import Logging._
+  import core.Fixed.CurrencyApi._
+  import core.Fixed._
 
-  private def program(config: Config): Future[Unit] = {
+  def program(config: Config): Future[Unit] = {
 
-    val allExchanges = mutable.Buffer[String]()
+    case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
 
     def singleExchange(fromCurrency: String,
                        toCurrency: String,
-                       amount: BigDecimal): Future[Unit] =
-      (exchangeRate(fromCurrency, toCurrency, config) map {
+                       amount: BigDecimal): Future[Option[Transaction]] =
+      (exchangeRate(fromCurrency, toCurrency)(config) map {
         case Right(rate) ⇒
           tell(s"$fromCurrency to $toCurrency rate = $rate")
-          allExchanges += s"Converted $fromCurrency $amount to $toCurrency at rate $rate"
-          ()
+          Some(Transaction(fromCurrency, toCurrency, amount, rate))
         case Left(error) ⇒
           logError(s"Couldn't fetch exchange rate. Error = $error")
-          ()
+          None
       }).recoverWith {
         case ex: Exception =>
           logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}")
           tell(s"Do you want to retry? Enter Y/N.")
           if (safeAsk(identity).toLowerCase == "y")
             singleExchange(fromCurrency, toCurrency, amount)
-          else Future.successful(())
+          else Future.successful(None)
       }
 
-    def exchangeLoop(currencyIdMap: Map[Int, String]): Future[Unit] = {
+    def exchangeLoop(currencyIdMap: Map[Int, String])(allTransactions: List[Transaction]): Future[Unit] = {
       val currencyIdsFormatted =
         currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",")
       tell(
@@ -51,8 +51,12 @@ object Program extends App {
       val toCurrency = safeAsk(value ⇒ currencyIdMap(value.toInt))
       tell(s"You chose $toCurrency")
       singleExchange(fromCurrency, toCurrency, amount)
-        .map(_ => tell(allExchanges.mkString("\n")))
-        .flatMap(_ ⇒ exchangeLoop(currencyIdMap))
+        .map(_.foldLeft(allTransactions)(_ :+ _))
+        .map { transactions =>
+          tell(transactions.map(t => s"Converted ${t.fromCurrency} ${t.amount} to ${t.toCurrency} at rate ${t.rate}").mkString("\n"))
+          transactions
+        }
+        .flatMap(exchangeLoop(currencyIdMap))
     }
 
     allCurrencies(config)
@@ -61,7 +65,7 @@ object Program extends App {
           .map(_.swap)
           .map(pair => (pair._1 + 1, pair._2))
           .toMap
-        exchangeLoop(currencyIdMap)
+        exchangeLoop(currencyIdMap)(List.empty)
       }
       .recoverWith {
         case ex: Exception =>
@@ -71,55 +75,33 @@ object Program extends App {
           program(config)
       }
   }
+}
 
-  private def safeAsk[T](convert: String => T): T =
+trait Algebra {
+
+  object Console {
+    def tell(statement: String): Unit = println(statement)
+    def ask: String = scala.io.StdIn.readLine()
+  }
+
+  import Console._
+
+  object Logging {
+    def logInfo(msg: String): Unit = tell(s"Info -  $msg")
+    def logError(msg: String): Unit = tell(s"Error -  $msg")
+    def logWarn(msg: String): Unit = tell(s"Warn -  $msg")
+  }
+
+  import Logging._
+
+  def safeAsk[T](convert: String => T): T =
     Try(convert(ask)).fold({ ex =>
       logInfo(s"User entered wrong input - ${ex.getMessage}")
       tell("Wrong input. Please enter again.")
       safeAsk(convert)
     }, identity)
+}
 
-  private case class Config()
-
-  private object CurrencyApi {
-
-    sealed trait Error
-
-    case object WrongCurrency extends Error
-
-    def allCurrencies(config: Config): Future[Set[String]] =
-      randomizeFuture(
-        Set("USD", "GBP", "INR", "SGD"),
-        "Couldn't fetch currencies"
-      )
-
-    def exchangeRate(from: String,
-                     to: String,
-                     config: Config): Future[Either[Error, BigDecimal]] =
-      if (from == "SGD") Future.successful(Left(WrongCurrency))
-      else
-        randomizeFuture(
-          Right(BigDecimal(Random.nextInt(10000)) / 100),
-          "Couldn't fetch exchange rate"
-        )
-
-    private def randomizeFuture[A](output: => A, error: => String) =
-      if (Random.nextBoolean()) Future.successful(output)
-      else Future.failed(new RuntimeException(error))
-  }
-
-  private object Console {
-    def tell(statement: String): Unit = println(statement)
-
-    def ask: String = scala.io.StdIn.readLine()
-  }
-
-  private object Logging {
-    def logInfo(msg: String): Unit = tell(s"Info -  $msg")
-
-    def logError(msg: String): Unit = tell(s"Error -  $msg")
-
-    def logWarn(msg: String): Unit = tell(s"Warn -  $msg")
-  }
-
+object Application extends App with Program {
+  Await.result(program(Config()), Duration.Inf)
 }
