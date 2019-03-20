@@ -3,31 +3,30 @@ package simplemonads
 import cats.data._
 import cats.instances.all._
 import cats.syntax.applicativeError._
-import cats.syntax.either._
+import core.Fixed.Config
+import core.Fixed.CurrencyApi._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future}
-import scala.util.{Random, Try}
+import scala.util.Try
 
-object Program extends App {
-  Await.result(program.run(Config()), Duration.Inf)
+trait Program extends Algebra {
 
   import Console._
-  import CurrencyApi._
   import Logging._
 
   private type Exchanges[A] = State[List[String], A]
-  private type FromConfig[A] = ReaderT[Future, Config, A]
+  type FromConfig[A] = ReaderT[Future, Config, A]
 
-  private def program: FromConfig[Unit] = {
+  def program: FromConfig[Unit] = {
 
     def addExchange(exchange: String): Exchanges[Unit] = State(current => (current :+ exchange, Unit))
 
     def singleExchange(fromCurrency: String,
                        toCurrency: String,
                        amount: BigDecimal): FromConfig[Exchanges[Unit]] =
-      exchangeRate(fromCurrency, toCurrency).map {
+      ReaderT((config: Config) => exchangeRate(fromCurrency, toCurrency)(config)).map {
         case Right(rate) =>
           tell(s"$fromCurrency to $toCurrency rate = $rate")
           addExchange(s"Converted $fromCurrency $amount to $toCurrency at rate $rate")
@@ -61,7 +60,7 @@ object Program extends App {
         .flatMap(exchangeLoop(currencyIdMap))
     }
 
-    allCurrencies
+    ReaderT((config: Config) => allCurrencies(config))
       .flatMap { currencies =>
         val currencyIdMap = currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap
         exchangeLoop(currencyIdMap)(State.empty[List[String], Unit])
@@ -73,58 +72,34 @@ object Program extends App {
       }
   }
 
-  private def safeAsk[T](convert: String => T): T =
+}
+
+trait Algebra {
+
+  object Console {
+    def tell(statement: String): Unit = println(statement)
+    def ask: String = scala.io.StdIn.readLine()
+  }
+
+  import Console._
+
+  object Logging {
+    def logInfo(msg: String) = log(s"Info -  $msg")
+    def logError(msg: String) = log(s"Error -  $msg")
+    def logWarn(msg: String) = log(s"Warn -  $msg")
+    private def log(msg: String) = tell(msg)
+  }
+
+  import Logging._
+
+  def safeAsk[T](convert: String => T): T =
     Try(convert(ask)).fold({ ex =>
       logInfo(s"User entered wrong input - ${ex.getMessage}")
       tell("Wrong input. Please enter again.")
       safeAsk(convert)
     }, identity)
+}
 
-  private case class Config()
-
-  private object CurrencyApi {
-
-    sealed trait Error
-
-    case object WrongCurrency extends Error
-
-    type ErrorOr[A] = Either[Error, A]
-
-    val allCurrencies: FromConfig[Set[String]] = Kleisli(_ ⇒
-      randomizeFuture(
-        Set("USD", "GBP", "INR", "SGD"),
-        "Couldn't fetch currencies"
-      )
-    )
-
-    def exchangeRate(from: String, to: String): FromConfig[ErrorOr[BigDecimal]] = Kleisli(_ ⇒
-      if (from == "SGD") Future.successful(WrongCurrency.asLeft[BigDecimal])
-      else
-        randomizeFuture(
-          (BigDecimal(Random.nextInt(10000)) / 100).asRight[Error],
-          "Couldn't fetch exchange rate"
-        )
-    )
-
-    private def randomizeFuture[A](output: => A, error: => String) =
-      if (Random.nextBoolean()) Future.successful(output)
-      else Future.failed(new RuntimeException(error))
-  }
-
-  private object Console {
-    def tell(statement: String): Unit = println(statement)
-
-    def ask: String = scala.io.StdIn.readLine()
-  }
-
-  private object Logging {
-    def logInfo(msg: String) = log(s"Info -  $msg")
-
-    def logError(msg: String) = log(s"Error -  $msg")
-
-    def logWarn(msg: String) = log(s"Warn -  $msg")
-
-    private def log(msg: String) = tell(msg)
-  }
-
+object Application extends App with Program {
+  Await.result(program.run(Config()), Duration.Inf)
 }
