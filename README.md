@@ -1,4 +1,4 @@
-#Learn-ZIO
+# Learn-ZIO
 
 This repo has code examples to understand the advantages of using [ZIO](https://scalaz.github.io/scalaz-zio/) library
 by comparing with the code examples using other libraries and techniques
