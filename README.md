@@ -13,6 +13,8 @@ The order in which the code exmaples should be read is given below:-
 The above mentioned terms represents different packages under source code.
 
 There is a `fixed` package which contains the `Config` case class and `CurrencyAPI` which every code example uses.
+
+Every solution contains a `Program` trait which depends on `Algebra` trait. The executable App executes the `program` defined in the `Program` trait. 
  
 All the code examples are based on the following requirements
 
