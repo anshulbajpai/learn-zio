@@ -3,69 +3,28 @@ package usingFinaltagless
 import cats.data.{ReaderT, StateT}
 import cats.mtl.{ApplicativeAsk, MonadState}
 import cats.{Monad, MonadError, Show}
-import fixed.Fixed.{Config, CurrencyApi}
 import fixed.Fixed.CurrencyApi.ErrorOr
+import fixed.Fixed.{Config, CurrencyApi}
 
 import scala.util.Try
 
-object Application extends App with Program {
-
-  import cats.effect.IO
-  import cats.effect.LiftIO._
-  import cats.implicits._
-  import cats.mtl.instances.all._
-
-  type ConfigedIO[A] = ReaderT[IO, Config, A]
-  type Effect1[A] = StateT[IO, List[Transaction], A]
-  type Effect[A] = ReaderT[Effect1, Config, A]
-
-  program[Effect].run(Config()).runEmptyS.unsafeRunAsyncAndForget()
-
-  private implicit def effectConsole(implicit ioConsole: Console[IO]): Application.Console[Effect] = new Console[Effect] {
-    override def tell(statement: String): Effect[Unit] = ioConsole.tell(statement).to[Effect]
-    override def ask: Effect[String] = ioConsole.ask.to[Effect]
-  }
-
-  private implicit def effectApi(implicit ioApi: CurrencyApiF[ConfigedIO]): Application.CurrencyApiF[Effect] = new CurrencyApiF[Effect] {
-    override def allCurrencies: Effect[Set[String]] = ioApi.allCurrencies.mapF(wrapIOInState)
-    override def exchangeRate(from: String, to: String): Effect[ErrorOr[BigDecimal]] = ioApi.exchangeRate(from, to).mapF(wrapIOInState)
-    private def wrapIOInState[A, B](io: IO[A]): StateT[IO, B, A] = StateT(s => io.map(a => (s, a)))
-  }
-
-  private implicit def consoleLoggingEffect(implicit consoleLoggingIO: ConsoleLogging[IO]): Application.ConsoleLogging[Effect] = new ConsoleLogging[Effect]()
-
-  private implicit lazy val ioConsole: Application.Console[IO] = new Console[IO] {
-    override def tell(statement: String): IO[Unit] = IO(println(statement))
-    override def ask: IO[String] = IO(scala.io.StdIn.readLine())
-  }
-
-  private implicit lazy val ioApi: Application.CurrencyApiF[ConfigedIO] = new CurrencyApiF[ConfigedIO] {
-    override def allCurrencies = ReaderT(config => IO.fromFuture(IO(CurrencyApi.allCurrencies(config))))
-    override def exchangeRate(from: String, to: String) = ReaderT(config => IO.fromFuture(IO(CurrencyApi.exchangeRate(from, to)(config))))
-  }
-
-  private implicit lazy val ioConsoleLogging: Application.ConsoleLogging[IO] = new ConsoleLogging[IO]
-}
-
 trait Program extends Algebra {
 
+  import Console._
+  import ConsoleLogging._
+  import CurrencyApiF._
   import cats.syntax.applicative._
   import cats.syntax.applicativeError._
   import cats.syntax.apply._
   import cats.syntax.flatMap._
   import cats.syntax.functor._
   import cats.syntax.option._
-  import Console._
-  import CurrencyApiF._
-  import ConsoleLogging._
 
   def program[F[_] : ConfigAsk : CurrencyApiF : Console : ThrowableMonad : TransactionState : ConsoleLogging]: F[Unit] = for {
     currencies <- currencies
     currencyIdMap <- currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap.pure[F]
-    _ <- transaction(currencyIdMap).handleErrorWith(handleTransactionError(_)).foreverM[Unit]
+    _ <- transaction(currencyIdMap).handleErrorWith(ex => logError(ex.getMessage)).foreverM[Unit]
   } yield ()
-
-  private def handleTransactionError[F[_] : ConsoleLogging](ex: Throwable): F[Unit] = logError(ex.getMessage)
 
   private def transaction[F[_] : CurrencyApiF : Console : ThrowableMonad : ConsoleLogging : TransactionState](currencyIdMap: Map[Int, String]): F[Unit] = for {
     currencyIdsFormatted <- currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",").pure[F]
@@ -107,14 +66,14 @@ trait Program extends Algebra {
 
 trait Algebra {
 
+  import Console._
+  import ConsoleLogging._
   import cats.syntax.applicative._
   import cats.syntax.applicativeError._
   import cats.syntax.apply._
   import cats.syntax.flatMap._
   import cats.syntax.functor._
   import cats.syntax.option._
-  import Console._
-  import ConsoleLogging._
 
   case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
 
@@ -147,8 +106,8 @@ trait Algebra {
 
   object Console {
     def apply[F[_] : Console] = implicitly[Console[F]]
-    def tell[F[_]: Console](statement: String): F[Unit] = Console[F].tell(statement)
-    def ask[F[_]: Console]: F[String] = Console[F].ask
+    def tell[F[_] : Console](statement: String): F[Unit] = Console[F].tell(statement)
+    def ask[F[_] : Console]: F[String] = Console[F].ask
   }
 
   trait CurrencyApiF[F[_]] {
@@ -177,7 +136,7 @@ trait Algebra {
 
   object ConsoleLogging {
     def apply[F[_] : ConsoleLogging] = implicitly[ConsoleLogging[F]]
-    def logInfo[F[_] : ConsoleLogging](msg: String): F[Unit]  = ConsoleLogging[F].logInfo(msg)
+    def logInfo[F[_] : ConsoleLogging](msg: String): F[Unit] = ConsoleLogging[F].logInfo(msg)
     def logError[F[_] : ConsoleLogging](msg: String): F[Unit] = ConsoleLogging[F].logError(msg)
     def logWarn[F[_] : ConsoleLogging](msg: String): F[Unit] = ConsoleLogging[F].logWarn(msg)
   }
@@ -191,4 +150,47 @@ trait Algebra {
     } yield result
   }
 }
+
+trait EffectInstances {
+  self: Algebra =>
+
+  import cats.effect.IO
+  import cats.effect.LiftIO._
+
+  type ConfigedIO[A] = ReaderT[IO, Config, A]
+  type Effect1[A] = StateT[IO, List[Transaction], A]
+  type Effect[A] = ReaderT[Effect1, Config, A]
+
+  implicit def effectConsole(implicit ioConsole: Console[IO]): Console[Effect] = new Console[Effect] {
+    override def tell(statement: String): Effect[Unit] = ioConsole.tell(statement).to[Effect]
+    override def ask: Effect[String] = ioConsole.ask.to[Effect]
+  }
+
+  implicit def effectApi(implicit ioApi: CurrencyApiF[ConfigedIO]): CurrencyApiF[Effect] = new CurrencyApiF[Effect] {
+    override def allCurrencies: Effect[Set[String]] = ioApi.allCurrencies.mapF(wrapIOInState)
+    override def exchangeRate(from: String, to: String): Effect[ErrorOr[BigDecimal]] = ioApi.exchangeRate(from, to).mapF(wrapIOInState)
+    private def wrapIOInState[A, B](io: IO[A]): StateT[IO, B, A] = StateT(s => io.map(a => (s, a)))
+  }
+
+  implicit def consoleLoggingEffect(implicit consoleLoggingIO: ConsoleLogging[IO]): ConsoleLogging[Effect] = new ConsoleLogging[Effect]()
+
+  implicit lazy val ioConsole: Console[IO] = new Console[IO] {
+    override def tell(statement: String): IO[Unit] = IO(println(statement))
+    override def ask: IO[String] = IO(scala.io.StdIn.readLine())
+  }
+
+  implicit lazy val ioApi: CurrencyApiF[ConfigedIO] = new CurrencyApiF[ConfigedIO] {
+    override def allCurrencies = ReaderT(config => IO.fromFuture(IO(CurrencyApi.allCurrencies(config))))
+    override def exchangeRate(from: String, to: String) = ReaderT(config => IO.fromFuture(IO(CurrencyApi.exchangeRate(from, to)(config))))
+  }
+
+  implicit lazy val ioConsoleLogging: ConsoleLogging[IO] = new ConsoleLogging[IO]
+}
+
+object Application extends App with Program with EffectInstances {
+  import cats.implicits._
+  import cats.mtl.instances.all._
+  program[Effect].run(Config()).runEmptyS.unsafeRunAsyncAndForget()
+}
+
 
