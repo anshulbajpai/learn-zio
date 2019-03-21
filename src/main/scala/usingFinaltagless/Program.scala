@@ -55,6 +55,9 @@ trait Program extends Algebra {
   import cats.syntax.flatMap._
   import cats.syntax.functor._
   import cats.syntax.option._
+  import Console._
+  import CurrencyApiF._
+  import ConsoleLogging._
 
   def program[F[_] : ConfigAsk : CurrencyApiF : Console : ThrowableMonad : TransactionState : ConsoleLogging]: F[Unit] = for {
     currencies <- currencies
@@ -62,18 +65,18 @@ trait Program extends Algebra {
     _ <- transaction(currencyIdMap).handleErrorWith(handleTransactionError(_)).foreverM[Unit]
   } yield ()
 
-  private def handleTransactionError[F[_] : ConsoleLogging](ex: Throwable): F[Unit] = ConsoleLogging[F].logError(ex.getMessage)
+  private def handleTransactionError[F[_] : ConsoleLogging](ex: Throwable): F[Unit] = logError(ex.getMessage)
 
   private def transaction[F[_] : CurrencyApiF : Console : ThrowableMonad : ConsoleLogging : TransactionState](currencyIdMap: Map[Int, String]): F[Unit] = for {
     currencyIdsFormatted <- currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",").pure[F]
-    _ <- Console[F].tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
+    _ <- tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
     fromCurrency <- safeAsk(value => currencyIdMap(value.toInt))
-    _ <- Console[F].tell(s"You chose $fromCurrency")
-    _ <- Console[F].tell(s"How much you want to convert?")
+    _ <- tell(s"You chose $fromCurrency")
+    _ <- tell(s"How much you want to convert?")
     amount <- safeAsk(BigDecimal(_))
-    _ <- Console[F].tell(s"Choose a currency want to convert to - $currencyIdsFormatted")
+    _ <- tell(s"Choose a currency want to convert to - $currencyIdsFormatted")
     toCurrency <- safeAsk(value => currencyIdMap(value.toInt))
-    _ <- Console[F].tell(s"You chose $toCurrency")
+    _ <- tell(s"You chose $toCurrency")
     rateOpt <- rate(fromCurrency, toCurrency)
     _ <- rateOpt.map(rate => handleTransaction(Transaction(fromCurrency, toCurrency, amount, rate))).getOrElse(().pure[F])
   } yield ()
@@ -81,7 +84,7 @@ trait Program extends Algebra {
   private def rate[F[_] : CurrencyApiF : ConsoleLogging : Console]
   (fromCurrency: String, toCurrency: String)
   (implicit throwableMonad: ThrowableMonad[F]): F[Option[BigDecimal]] = {
-    userRetry(CurrencyApiF[F].exchangeRate(fromCurrency, toCurrency)).flatMap {
+    userRetry(exchangeRate(fromCurrency, toCurrency)).flatMap {
       case Some(Right(rate)) => rate.some.pure[F]
       case Some(Left(error)) => throwableMonad.raiseError(new RuntimeException(s"Couldn't fetch exchange rate. Error = $error"))
       case None => none[BigDecimal].pure[F]
@@ -89,16 +92,16 @@ trait Program extends Algebra {
   }
 
   private def handleTransaction[F[_] : Console : TransactionState : Monad](transaction: Transaction): F[Unit] = for {
-    _ <- Console[F].tell(s"${transaction.fromCurrency} to ${transaction.toCurrency} rate = ${transaction.rate}")
+    _ <- tell(s"${transaction.fromCurrency} to ${transaction.toCurrency} rate = ${transaction.rate}")
     _ <- addTransaction(transaction)
     transactions <- allTransactions
-    _ <- Console[F].tell(transactions.map(Show[Transaction].show).mkString("\n"))
+    _ <- tell(transactions.map(Show[Transaction].show).mkString("\n"))
   } yield ()
 
   private def currencies[F[_] : CurrencyApiF : ThrowableMonad : ConsoleLogging]: F[Set[String]] =
-    CurrencyApiF[F].allCurrencies
+    allCurrencies
       .handleErrorWith { ex =>
-        ConsoleLogging[F].logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}") *> currencies
+        logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}") *> currencies
       }
 }
 
@@ -110,6 +113,8 @@ trait Algebra {
   import cats.syntax.flatMap._
   import cats.syntax.functor._
   import cats.syntax.option._
+  import Console._
+  import ConsoleLogging._
 
   case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
 
@@ -129,12 +134,10 @@ trait Algebra {
   type ThrowableMonad[F[_]] = MonadError[F, Throwable]
 
   def safeAsk[F[_] : Console : ThrowableMonad, T](convert: String => T): F[T] =
-    Console[F].ask
+    ask
       .map(input => Try(convert(input)))
       .flatMap(_.fold(_.raiseError[F, T], _.pure))
-      .handleErrorWith { _ =>
-        Console[F].tell("Wrong input. Please enter again.") *> safeAsk(convert)
-      }
+      .handleErrorWith(_ => tell("Wrong input. Please enter again.") *> safeAsk(convert))
 
 
   trait Console[F[_]] {
@@ -144,6 +147,8 @@ trait Algebra {
 
   object Console {
     def apply[F[_] : Console] = implicitly[Console[F]]
+    def tell[F[_]: Console](statement: String): F[Unit] = Console[F].tell(statement)
+    def ask[F[_]: Console]: F[String] = Console[F].ask
   }
 
   trait CurrencyApiF[F[_]] {
@@ -153,6 +158,8 @@ trait Algebra {
 
   object CurrencyApiF {
     def apply[F[_] : CurrencyApiF] = implicitly[CurrencyApiF[F]]
+    def allCurrencies[F[_] : CurrencyApiF]: F[Set[String]] = CurrencyApiF[F].allCurrencies
+    def exchangeRate[F[_] : CurrencyApiF](from: String, to: String): F[ErrorOr[BigDecimal]] = CurrencyApiF[F].exchangeRate(from, to)
   }
 
   trait Logging[F[_]] {
@@ -170,12 +177,15 @@ trait Algebra {
 
   object ConsoleLogging {
     def apply[F[_] : ConsoleLogging] = implicitly[ConsoleLogging[F]]
+    def logInfo[F[_] : ConsoleLogging](msg: String): F[Unit]  = ConsoleLogging[F].logInfo(msg)
+    def logError[F[_] : ConsoleLogging](msg: String): F[Unit] = ConsoleLogging[F].logError(msg)
+    def logWarn[F[_] : ConsoleLogging](msg: String): F[Unit] = ConsoleLogging[F].logWarn(msg)
   }
 
   def userRetry[F[_] : ThrowableMonad : ConsoleLogging : Console, A](fa: => F[A]): F[Option[A]] = fa.map(_.some).handleErrorWith { ex =>
     for {
-      _ <- ConsoleLogging[F].logError(s"Got error. Error = ${ex.getMessage}")
-      _ <- Console[F].tell("Do you want to retry? Enter y/n.")
+      _ <- logError(s"Got error. Error = ${ex.getMessage}")
+      _ <- tell("Do you want to retry? Enter y/n.")
       canRetry <- safeAsk(_.toLowerCase == "y")
       result <- if (canRetry) userRetry(fa) else none[A].pure[F]
     } yield result
