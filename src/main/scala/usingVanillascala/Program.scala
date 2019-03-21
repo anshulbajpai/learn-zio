@@ -18,9 +18,9 @@ trait Program extends Algebra {
 
     case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
 
-    def singleExchange(fromCurrency: String,
-                       toCurrency: String,
-                       amount: BigDecimal): Future[Option[Transaction]] =
+    def createTransaction(fromCurrency: String,
+                          toCurrency: String,
+                          amount: BigDecimal): Future[Option[Transaction]] =
       (exchangeRate(fromCurrency, toCurrency)(config) map {
         case Right(rate) ⇒
           tell(s"$fromCurrency to $toCurrency rate = $rate")
@@ -33,16 +33,14 @@ trait Program extends Algebra {
           logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}")
           tell(s"Do you want to retry? Enter Y/N.")
           if (safeAsk(identity).toLowerCase == "y")
-            singleExchange(fromCurrency, toCurrency, amount)
+            createTransaction(fromCurrency, toCurrency, amount)
           else Future.successful(None)
       }
 
-    def exchangeLoop(currencyIdMap: Map[Int, String])(allTransactions: List[Transaction]): Future[Unit] = {
+    def transactionLoop(currencyIdMap: Map[Int, String])(allTransactions: List[Transaction]): Future[Unit] = {
       val currencyIdsFormatted =
         currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",")
-      tell(
-        s"Choose a currency you want to convert from - $currencyIdsFormatted"
-      )
+      tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
       val fromCurrency = safeAsk(value ⇒ currencyIdMap(value.toInt))
       tell(s"You chose $fromCurrency")
       tell(s"How much you want to convert?")
@@ -50,13 +48,13 @@ trait Program extends Algebra {
       tell(s"Choose a currency want to convert to - $currencyIdsFormatted")
       val toCurrency = safeAsk(value ⇒ currencyIdMap(value.toInt))
       tell(s"You chose $toCurrency")
-      singleExchange(fromCurrency, toCurrency, amount)
+      createTransaction(fromCurrency, toCurrency, amount)
         .map(_.foldLeft(allTransactions)(_ :+ _))
         .map { transactions =>
           tell(transactions.map(t => s"Converted ${t.fromCurrency} ${t.amount} to ${t.toCurrency} at rate ${t.rate}").mkString("\n"))
           transactions
         }
-        .flatMap(exchangeLoop(currencyIdMap))
+        .flatMap(transactionLoop(currencyIdMap))
     }
 
     allCurrencies(config)
@@ -65,13 +63,11 @@ trait Program extends Algebra {
           .map(_.swap)
           .map(pair => (pair._1 + 1, pair._2))
           .toMap
-        exchangeLoop(currencyIdMap)(List.empty)
+        transactionLoop(currencyIdMap)(List.empty)
       }
       .recoverWith {
         case ex: Exception =>
-          logWarn(
-            s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}"
-          )
+          logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}")
           program(config)
       }
   }
