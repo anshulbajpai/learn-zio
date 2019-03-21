@@ -1,6 +1,6 @@
 package usingMonads
 
-import cats.data._
+import cats.data.{State, _}
 import cats.instances.all._
 import cats.syntax.applicativeError._
 import fixed.Fixed.Config
@@ -16,32 +16,37 @@ trait Program extends Algebra {
   import Console._
   import Logging._
 
-  private type Exchanges[A] = State[List[String], A]
   type FromConfig[A] = ReaderT[Future, Config, A]
 
   def program: FromConfig[Unit] = {
 
-    def addExchange(exchange: String): Exchanges[Unit] = State(current => (current :+ exchange, Unit))
+    type TransactionState[A] = State[List[Transaction], A]
 
-    def singleExchange(fromCurrency: String,
-                       toCurrency: String,
-                       amount: BigDecimal): FromConfig[Exchanges[Unit]] =
+    case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
+
+    def addExchange(exchange: Transaction): TransactionState[Unit] = State(current => (current :+ exchange, Unit))
+
+    def singleTransaction(fromCurrency: String,
+                          toCurrency: String,
+                          amount: BigDecimal): FromConfig[TransactionState[Unit]] =
       ReaderT((config: Config) => exchangeRate(fromCurrency, toCurrency)(config)).map {
         case Right(rate) =>
           tell(s"$fromCurrency to $toCurrency rate = $rate")
-          addExchange(s"Converted $fromCurrency $amount to $toCurrency at rate $rate")
+          addExchange(Transaction(fromCurrency, toCurrency, amount, rate))
         case Left(error) ⇒
           logError(s"Couldn't fetch exchange rate. Error = $error")
-          State.empty[List[String], Unit]
+          State.empty[List[Transaction], Unit]
       }.handleErrorWith { ex: Throwable =>
         logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}")
         tell(s"Do you want to retry? Enter Y/N.")
         if (safeAsk(identity).toLowerCase == "y")
-          singleExchange(fromCurrency, toCurrency, amount)
-        else ReaderT(_ => Future.successful(State.empty[List[String], Unit]))
+          singleTransaction(fromCurrency, toCurrency, amount)
+        else ReaderT(_ => Future.successful(State.empty[List[Transaction], Unit]))
       }
 
-    def exchangeLoop(currencyIdMap: Map[Int, String])(oldExchanges: Exchanges[Unit]): FromConfig[Unit] = {
+    import cats.syntax.apply._
+
+    def transactionLoop(currencyIdMap: Map[Int, String])(oldTransactions: TransactionState[Unit]): FromConfig[Unit] = {
       val currencyIdsFormatted = currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",")
       tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
       val fromCurrency = safeAsk(value ⇒ currencyIdMap(value.toInt))
@@ -51,19 +56,19 @@ trait Program extends Algebra {
       tell(s"Choose a currency want to convert to - $currencyIdsFormatted")
       val toCurrency = safeAsk(value ⇒ currencyIdMap(value.toInt))
       tell(s"You chose $toCurrency")
-      singleExchange(fromCurrency, toCurrency, amount)
+      singleTransaction(fromCurrency, toCurrency, amount)
         .map { exchanges =>
-          val newExchanges = oldExchanges.flatMap(_ => exchanges)
-          tell(newExchanges.runEmptyS.value.mkString("\n"))
+          val newExchanges = oldTransactions *> exchanges
+          tell(newExchanges.runEmptyS.value.map(t => s"Converted ${t.fromCurrency} ${t.amount} to ${t.toCurrency} at rate ${t.rate}").mkString("\n"))
           newExchanges
         }
-        .flatMap(exchangeLoop(currencyIdMap))
+        .flatMap(transactionLoop(currencyIdMap))
     }
 
     ReaderT((config: Config) => allCurrencies(config))
       .flatMap { currencies =>
         val currencyIdMap = currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap
-        exchangeLoop(currencyIdMap)(State.empty[List[String], Unit])
+        transactionLoop(currencyIdMap)(State.empty[List[Transaction], Unit])
       }
       .handleErrorWith {
         case ex: Exception =>
