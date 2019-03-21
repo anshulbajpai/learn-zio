@@ -20,19 +20,13 @@ trait Program extends Algebra {
 
   def program: FromConfig[Unit] = {
 
-    type TransactionState[A] = State[List[Transaction], A]
-
-    case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
-
-    def addExchange(exchange: Transaction): TransactionState[Unit] = State(current => (current :+ exchange, Unit))
-
     def singleTransaction(fromCurrency: String,
                           toCurrency: String,
                           amount: BigDecimal): FromConfig[TransactionState[Unit]] =
       ReaderT((config: Config) => exchangeRate(fromCurrency, toCurrency)(config)).map {
         case Right(rate) =>
           tell(s"$fromCurrency to $toCurrency rate = $rate")
-          addExchange(Transaction(fromCurrency, toCurrency, amount, rate))
+          addTransaction(Transaction(fromCurrency, toCurrency, amount, rate))
         case Left(error) ⇒
           logError(s"Couldn't fetch exchange rate. Error = $error")
           State.empty[List[Transaction], Unit]
@@ -57,10 +51,10 @@ trait Program extends Algebra {
       val toCurrency = safeAsk(value ⇒ currencyIdMap(value.toInt))
       tell(s"You chose $toCurrency")
       singleTransaction(fromCurrency, toCurrency, amount)
-        .map { exchanges =>
-          val newExchanges = oldTransactions *> exchanges
-          tell(newExchanges.runEmptyS.value.map(t => s"Converted ${t.fromCurrency} ${t.amount} to ${t.toCurrency} at rate ${t.rate}").mkString("\n"))
-          newExchanges
+        .map { newTransactions =>
+          val transactions = oldTransactions *> newTransactions
+          tell(transactions.runEmptyS.value.map(t => s"Converted ${t.fromCurrency} ${t.amount} to ${t.toCurrency} at rate ${t.rate}").mkString("\n"))
+          transactions
         }
         .flatMap(transactionLoop(currencyIdMap))
     }
@@ -80,6 +74,12 @@ trait Program extends Algebra {
 }
 
 trait Algebra {
+
+  type TransactionState[A] = State[List[Transaction], A]
+
+  case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
+  def addTransaction(transaction: Transaction): TransactionState[Unit] = State(current => (current :+ transaction, Unit))
+
 
   object Console {
     def tell(statement: String): Unit = println(statement)
