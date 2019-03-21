@@ -1,52 +1,51 @@
 package usingIO
 
-import cats.data._
+import cats.data.{State, _}
 import cats.effect.IO
 import cats.implicits._
+import fixed.Fixed.Config
+import fixed.Fixed.CurrencyApi.ErrorOr
 
 import scala.concurrent.Future
-import scala.util.{Random, Try}
+import scala.util.Try
+import fixed.Fixed.CurrencyApi._
 
-object Program extends App {
-  program.run(Config()).unsafeRunAsyncAndForget()
-
+trait Program extends Algebra {
   import Console._
-  import CurrencyApi._
   import Logging._
 
-  private type Exchanges[A] = State[List[String], A]
-  private type FromConfig[A] = ReaderT[IO, Config, A]
+  val program: FromConfig[Unit] = {
 
-  private lazy val program: FromConfig[Unit] = {
-
-    case class TransactionRequest(fromCurrency: String, toCurrency: String, amount: BigDecimal)
-
-    def createExchange(transactionRequest: TransactionRequest, errorOrRate: ErrorOr[BigDecimal]): IO[Exchanges[Unit]] = (for {
+    def createTransaction(fromCurrency: String,
+                       toCurrency: String,
+                       amount: BigDecimal, errorOrRate: ErrorOr[BigDecimal]): IO[TransactionState[Unit]] = (for {
       rate <- IO.fromEither(errorOrRate)
-      _ <- tell(s"${transactionRequest.fromCurrency} to ${transactionRequest.toCurrency} rate = $rate")
-      exchanges <- addExchange(s"Converted ${transactionRequest.fromCurrency} ${transactionRequest.amount} to ${transactionRequest.toCurrency} at rate $rate")
-    } yield exchanges).handleErrorWith { error =>
-      logError(s"Couldn't fetch exchange rate. Error = $error") *> IO.pure(noExchanges)
+      _ <- tell(s"$fromCurrency to $toCurrency rate = $rate")
+      transactions <- addTransaction(Transaction(fromCurrency, toCurrency, amount, rate))
+    } yield transactions).handleErrorWith { error =>
+      logError(s"Couldn't fetch exchange rate. Error = $error") *> IO.pure(noTransactions)
     }
 
-    def handleTransaction(transactionRequest: TransactionRequest): FromConfig[Exchanges[Unit]] =
-      exchangeRate(transactionRequest.fromCurrency, transactionRequest.toCurrency).mapF(_.toIO).mapF { errorOrRateIO =>
+    def handleTransaction(fromCurrency: String, toCurrency: String, amount: BigDecimal): FromConfig[TransactionState[Unit]] =
+      ReaderT((config: Config) => exchangeRate(fromCurrency, toCurrency)(config)).mapF(_.toIO).mapF { errorOrRateIO =>
         for {
           errorOrRate <- errorOrRateIO
-          exchanges <- createExchange(transactionRequest, errorOrRate)
-        } yield exchanges
+          transactions <- createTransaction(fromCurrency, toCurrency, amount, errorOrRate)
+        } yield transactions
       }.handleErrorWith { ex: Throwable =>
         val askForRetry = logError(s"Couldn't fetch error rate. Error = ${ex.getMessage}") *>
           tell("Do you want to retry? Enter y/n.") *>
           safeAsk(_.toLowerCase == "y")
         for {
           canRetry <- askForRetry.toConfigReader
-          result <- if (canRetry) handleTransaction(transactionRequest) else IO.pure(noExchanges).toConfigReader
+          result <- if (canRetry) handleTransaction(fromCurrency, toCurrency, amount) else IO.pure(noTransactions).toConfigReader
         } yield result
       }
 
-    def convert(currencyIdMap: Map[Int, String]): FromConfig[Exchanges[Unit]] = {
+    def convert(currencyIdMap: Map[Int, String]): FromConfig[TransactionState[Unit]] = {
       val currencyIdsFormatted = currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",")
+
+      case class TransactionRequest(fromCurrency: String, toCurrency: String, amount: BigDecimal)
 
       val transactionRequest = for {
         _ <- tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
@@ -59,38 +58,60 @@ object Program extends App {
         _ <- tell(s"You chose $toCurrency")
       } yield TransactionRequest(fromCurrency, toCurrency, amount)
 
-      transactionRequest.toConfigReader >>= handleTransaction
+      transactionRequest.toConfigReader.flatMap(t => handleTransaction(t.fromCurrency, t.toCurrency, t.amount))
     }
 
-    def conversions(currencyIdMap: Map[Int, String])(oldExchanges: Exchanges[Unit]): FromConfig[Unit] = convert(currencyIdMap)
-      .map(newExchanges => oldExchanges *> newExchanges)
-      .mapF(exchangesIO => exchangesIO.flatMap(exchanges => tell(exchanges.runEmptyS.value.mkString("\n")) *> IO.pure(exchanges)))
+    def conversions(currencyIdMap: Map[Int, String])(oldTransactions: TransactionState[Unit]): FromConfig[Unit] = convert(currencyIdMap)
+      .map(newTransactions => oldTransactions *> newTransactions)
+      .mapF(transactionsIO => transactionsIO.flatMap(transactions => tell(transactions.runEmptyS.value.map(t => s"Converted ${t.fromCurrency} ${t.amount} to ${t.toCurrency} at rate ${t.rate}").mkString("\n")) *> IO.pure(transactions)))
       .flatMap(conversions(currencyIdMap))
 
-    allCurrencies.mapF(_.toIO)
+    ReaderT((config: Config) => allCurrencies(config)).mapF(_.toIO)
       .flatMap { currencies =>
         val currencyIdMap = currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap
-        conversions(currencyIdMap)(noExchanges)
+        conversions(currencyIdMap)(noTransactions)
       }
       .handleErrorWith {
         case ex: Exception =>
           logWarn(s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}").toConfigReader *> program
       }
   }
+}
 
-  private implicit class IOOps[A](target: IO[A]) {
+trait Algebra {
+
+  type FromConfig[A] = ReaderT[IO, Config, A]
+  case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
+  type TransactionState[A] = State[List[Transaction], A]
+
+  implicit class IOOps[A](target: IO[A]) {
     val toConfigReader: FromConfig[A] = ReaderT(_ => target)
   }
 
-  private implicit class FutureOps[A](target: Future[A]) {
+  implicit class FutureOps[A](target: Future[A]) {
     val toIO: IO[A] = IO.fromFuture(IO(target))
   }
 
-  private def noExchanges = State.empty[List[String], Unit]
+  def noTransactions = State.empty[List[Transaction], Unit]
+  def addTransaction(transaction: Transaction): IO[TransactionState[Unit]] = IO.pure(State(current => (current :+ transaction, Unit)))
 
-  private def addExchange(exchangeMessage: String): IO[Exchanges[Unit]] = IO.pure(State(current => (current :+ exchangeMessage, Unit)))
+  object Console {
+    def tell(statement: String): IO[Unit] = IO(println(statement))
+    def ask: IO[String] = IO(scala.io.StdIn.readLine())
+  }
 
-  private def safeAsk[T](convert: String => T): IO[T] =
+  import Console._
+
+  object Logging {
+    def logInfo(msg: String): IO[Unit] = log(s"Info -  $msg")
+    def logError(msg: String): IO[Unit] = log(s"Error -  $msg")
+    def logWarn(msg: String): IO[Unit] = log(s"Warn -  $msg")
+    private def log(msg: String) = tell(msg)
+  }
+
+  import Logging._
+
+  def safeAsk[T](convert: String => T): IO[T] =
     (for {
       value <- ask
       converted <- IO.fromEither(Try(convert(value)).toEither)
@@ -99,52 +120,8 @@ object Program extends App {
         tell("Wrong input. Please enter again.") *>
         safeAsk(convert)
     }
+}
 
-  private case class Config()
-
-  private object CurrencyApi {
-
-    sealed trait Error extends Throwable
-
-    case object WrongCurrency extends Error
-
-    type ErrorOr[A] = Either[Error, A]
-
-    def allCurrencies: ReaderT[Future, Config, Set[String]] = Kleisli(_ ⇒
-      randomizeFuture(
-        Set("USD", "GBP", "INR", "SGD"),
-        "Couldn't fetch currencies"
-      )
-    )
-
-    def exchangeRate(from: String, to: String): ReaderT[Future, Config, ErrorOr[BigDecimal]] = Kleisli(_ ⇒
-      if (from == "SGD") Future.successful(WrongCurrency.asLeft[BigDecimal])
-      else
-        randomizeFuture(
-          (BigDecimal(Random.nextInt(10000)) / 100).asRight[Error],
-          "Couldn't fetch exchange rate"
-        )
-    )
-
-    private def randomizeFuture[A](output: => A, error: => String) =
-      if (Random.nextBoolean()) Future.successful(output)
-      else Future.failed(new RuntimeException(error))
-  }
-
-  private object Console {
-    def tell(statement: String): IO[Unit] = IO(println(statement))
-
-    def ask: IO[String] = IO(scala.io.StdIn.readLine())
-  }
-
-  private object Logging {
-    def logInfo(msg: String): IO[Unit] = log(s"Info -  $msg")
-
-    def logError(msg: String): IO[Unit] = log(s"Error -  $msg")
-
-    def logWarn(msg: String): IO[Unit] = log(s"Warn -  $msg")
-
-    private def log(msg: String) = tell(msg)
-  }
-
+object Application extends App with Program {
+  program.run(Config()).unsafeRunAsyncAndForget()
 }
