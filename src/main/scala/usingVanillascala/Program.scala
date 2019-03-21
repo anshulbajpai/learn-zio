@@ -1,6 +1,6 @@
-package simplescala
+package usingVanillascala
 
-import core.Fixed.Config
+import fixed.Fixed.Config
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
@@ -11,8 +11,8 @@ trait Program extends Algebra {
 
   import Console._
   import Logging._
-  import core.Fixed.CurrencyApi._
-  import core.Fixed._
+  import fixed.Fixed.CurrencyApi._
+  import fixed.Fixed._
 
   def program(config: Config): Future[Unit] = {
 

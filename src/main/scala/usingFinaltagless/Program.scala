@@ -1,10 +1,10 @@
-package finaltagless
+package usingFinaltagless
 
 import cats.data.{ReaderT, StateT}
 import cats.mtl.{ApplicativeAsk, MonadState}
 import cats.{Monad, MonadError, Show}
-import core.Fixed.{Config, CurrencyApi}
-import core.Fixed.CurrencyApi.ErrorOr
+import fixed.Fixed.{Config, CurrencyApi}
+import fixed.Fixed.CurrencyApi.ErrorOr
 
 import scala.util.Try
 

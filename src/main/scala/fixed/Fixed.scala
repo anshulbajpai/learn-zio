@@ -1,4 +1,4 @@
-package core
+package fixed
 
 import scala.concurrent.Future
 import scala.util.Random

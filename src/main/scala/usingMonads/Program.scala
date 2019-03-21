@@ -1,10 +1,10 @@
-package simplemonads
+package usingMonads
 
 import cats.data._
 import cats.instances.all._
 import cats.syntax.applicativeError._
-import core.Fixed.Config
-import core.Fixed.CurrencyApi._
+import fixed.Fixed.Config
+import fixed.Fixed.CurrencyApi._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
