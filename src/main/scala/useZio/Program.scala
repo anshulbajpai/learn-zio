@@ -2,14 +2,16 @@ package useZio
 
 import fixed.Fixed.{Config, CurrencyApi}
 import scalaz.zio.{TaskR, UIO, ZIO}
+import cats.syntax.option._
 
 trait Program extends Algebra {
 
   import Console._
   import CurrencyApiZ._
+  import Logging._
 
   val program = for {
-    currencies <- allCurrencies
+    currencies <- autoRetry(allCurrencies)(ex =>  s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}")
     currencyIdMap <- ZIO.succeed(currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap)
     _ <- transaction(currencyIdMap).forever
   } yield ()
@@ -24,12 +26,15 @@ trait Program extends Algebra {
     _ <- tell(s"Choose a currency want to convert to - $currencyIdsFormatted")
     toCurrency <- ask.map(value => currencyIdMap(value.toInt))
     _ <- tell(s"You chose $toCurrency")
-    rate <- exchangeRate(fromCurrency, toCurrency)
-    _ <- tell(s"Converted $fromCurrency $amount to $toCurrency at rate $rate")
+    rateOpt <- userRetry(exchangeRate(fromCurrency, toCurrency))(ex => s"Couldn't fetch exchange rate - Error = ${ex.getMessage}")
+    _ <- rateOpt.map(rate => tell(s"Converted $fromCurrency $amount to $toCurrency at rate $rate")).getOrElse(UIO.succeed(()))
   } yield ()
 }
 
 trait Algebra {
+
+  import Logging._
+  import Console._
 
   trait Console {
     def console: Console.Service
@@ -48,7 +53,9 @@ trait Algebra {
     trait Live extends Service {
       val config = Config()
     }
+
     object Live extends Live
+
   }
 
   object Console {
@@ -119,13 +126,26 @@ trait Algebra {
 
   }
 
+  def autoRetry[R, E, A](zio: ZIO[R, E, A])(errorLog: E => String): ZIO[Logging with R, Unit, A] =
+    zio.flatMapError(e => logWarn(errorLog(e))).orElse(autoRetry(zio)(errorLog))
+
+  def userRetry[R, E, A](zio: ZIO[R, E, A])(errorLog: E => String): ZIO[R with Console with Logging, Unit, Option[A]] = {
+    val retry = for {
+      _ <- tell("Do you want to retry? Enter y/n.")
+      canRetry <- ask.map(_.toLowerCase == "y")
+      result <- if (canRetry) userRetry(zio)(errorLog) else ZIO.accessM((r: R) => UIO.succeed(none[A]))
+    } yield result
+    zio.map(_.some).flatMapError(e => logError(errorLog(e))).orElse(retry)
+  }
+
 }
 
 object Application extends scalaz.zio.App with Program {
-  val liveEnv = new Console with ConfigProvider with CurrencyApiZ {
+  val liveEnv = new Console with ConfigProvider with CurrencyApiZ with Logging {
     override val console: Application.Console.Service = Console.Live
     override val service: Application.ConfigProvider.Service = ConfigProvider.Live
     override val currencyApi: Application.CurrencyApiZ.Service = CurrencyApiZ.Live
+    override def logging: Application.Logging.Service = Logging.Live
   }
   override def run(args: List[String]): ZIO[Application.Environment, Nothing, Int] = program.provide(liveEnv).fold(_ => 1, _ => 0)
 }
