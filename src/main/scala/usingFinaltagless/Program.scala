@@ -56,7 +56,7 @@ trait Program extends Algebra {
   import cats.syntax.functor._
   import cats.syntax.option._
 
-  def program[F[_] : ConfigAsk : CurrencyApiF : Console : ThrowableMonad : ExchangeState : ConsoleLogging]: F[Unit] = for {
+  def program[F[_] : ConfigAsk : CurrencyApiF : Console : ThrowableMonad : TransactionState : ConsoleLogging]: F[Unit] = for {
     currencies <- currencies
     currencyIdMap <- currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap.pure[F]
     _ <- transaction(currencyIdMap).handleErrorWith(handleTransactionError(_)).foreverM[Unit]
@@ -64,7 +64,7 @@ trait Program extends Algebra {
 
   private def handleTransactionError[F[_] : ConsoleLogging](ex: Throwable): F[Unit] = ConsoleLogging[F].logError(ex.getMessage)
 
-  private def transaction[F[_] : CurrencyApiF : Console : ThrowableMonad : ConsoleLogging : ExchangeState](currencyIdMap: Map[Int, String]): F[Unit] = for {
+  private def transaction[F[_] : CurrencyApiF : Console : ThrowableMonad : ConsoleLogging : TransactionState](currencyIdMap: Map[Int, String]): F[Unit] = for {
     currencyIdsFormatted <- currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(",").pure[F]
     _ <- Console[F].tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
     fromCurrency <- safeAsk(value => currencyIdMap(value.toInt))
@@ -88,11 +88,11 @@ trait Program extends Algebra {
     }
   }
 
-  private def handleTransaction[F[_] : Console : ExchangeState : Monad](transaction: Transaction): F[Unit] = for {
+  private def handleTransaction[F[_] : Console : TransactionState : Monad](transaction: Transaction): F[Unit] = for {
     _ <- Console[F].tell(s"${transaction.fromCurrency} to ${transaction.toCurrency} rate = ${transaction.rate}")
-    _ <- addExchange(transaction)
-    exchanges <- allExchanges
-    _ <- Console[F].tell(exchanges.map(Show[Transaction].show).mkString("\n"))
+    _ <- addTransaction(transaction)
+    transactions <- allTransactions
+    _ <- Console[F].tell(transactions.map(Show[Transaction].show).mkString("\n"))
   } yield ()
 
   private def currencies[F[_] : CurrencyApiF : ThrowableMonad : ConsoleLogging]: F[Set[String]] =
@@ -120,10 +120,10 @@ trait Algebra {
 
   def config[F[_] : ConfigAsk]: F[Config] = ApplicativeAsk[F, Config].reader(identity)
 
-  def addExchange[F[_] : ExchangeState](exchange: Transaction): F[Unit] = MonadState[F, List[Transaction]].modify(_ :+ exchange)
-  def allExchanges[F[_] : ExchangeState]: F[List[Transaction]] = MonadState[F, List[Transaction]].inspect(identity)
+  def addTransaction[F[_] : TransactionState](transaction: Transaction): F[Unit] = MonadState[F, List[Transaction]].modify(_ :+ transaction)
+  def allTransactions[F[_] : TransactionState]: F[List[Transaction]] = MonadState[F, List[Transaction]].inspect(identity)
 
-  type ExchangeState[F[_]] = MonadState[F, List[Transaction]]
+  type TransactionState[F[_]] = MonadState[F, List[Transaction]]
   type ConfigAsk[F[_]] = ApplicativeAsk[F, Config]
 
   type ThrowableMonad[F[_]] = MonadError[F, Throwable]
