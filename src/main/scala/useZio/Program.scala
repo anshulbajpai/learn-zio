@@ -5,6 +5,8 @@ import fixed.Fixed.CurrencyApi.ErrorOr
 import fixed.Fixed.{Config, CurrencyApi}
 import scalaz.zio.{TaskR, UIO, ZIO}
 
+import scala.util.Try
+
 trait Program extends Algebra {
 
   import Console._
@@ -20,12 +22,12 @@ trait Program extends Algebra {
   private def transaction(currencyIdMap: Map[Int, String]) = for {
     currencyIdsFormatted <- ZIO.succeed(currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(","))
     _ <- tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
-    fromCurrency <- ask.map(v => currencyIdMap(v.toInt))
+    fromCurrency <- safeAsk(v => currencyIdMap(v.toInt))
     _ <- tell(s"You chose $fromCurrency")
     _ <- tell(s"How much you want to convert?")
-    amount <- ask.map(BigDecimal(_))
+    amount <- safeAsk(BigDecimal(_))
     _ <- tell(s"Choose a currency want to convert to - $currencyIdsFormatted")
-    toCurrency <- ask.map(value => currencyIdMap(value.toInt))
+    toCurrency <- safeAsk(value => currencyIdMap(value.toInt))
     _ <- tell(s"You chose $toCurrency")
     rateOpt <- rate(fromCurrency, toCurrency)
     _ <- rateOpt.map(rate => tell(s"Converted $fromCurrency $amount to $toCurrency at rate $rate")).getOrElse(UIO.unit)
@@ -142,11 +144,18 @@ trait Algebra {
   def userRetry[R, E, A](zio: ZIO[R, E, A])(errorLog: E => String): ZIO[R with Console with Logging, Nothing, Option[A]] = {
     val retry = for {
       _ <- tell("Do you want to retry? Enter y/n.")
-      canRetry <- ask.map(_.toLowerCase == "y")
+      canRetry <- safeAsk(_.toLowerCase == "y")
       result <- if (canRetry) userRetry(zio)(errorLog) else UIO.succeed(none[A])
     } yield result
     zio.map(_.some).flatMapError(e => logError(errorLog(e))).orElse(retry)
   }
+
+  def safeAsk[T](convert: String => T): ZIO[Console with Logging, Nothing, T] = (for {
+    stringValue <- ask
+    value <- ZIO.fromTry(Try(convert(stringValue)))
+  } yield value)
+    .flatMapError(ex => logError(s"User entered wrong input - ${ex.getMessage}"))
+    .orElse(tell("Wrong input. Please enter again.") *> safeAsk(convert))
 
 }
 
