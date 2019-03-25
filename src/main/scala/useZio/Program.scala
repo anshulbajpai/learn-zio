@@ -1,5 +1,6 @@
 package useZio
 
+import cats.Show
 import cats.syntax.option._
 import fixed.Fixed.CurrencyApi.ErrorOr
 import fixed.Fixed.{Config, CurrencyApi}
@@ -16,8 +17,16 @@ trait Program extends Algebra {
   val program = for {
     currencies <- autoRetry(allCurrencies)(ex => s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}")
     currencyIdMap <- ZIO.succeed(currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap)
-    _ <- transaction(currencyIdMap).flatMapError(ex => logError(ex.getMessage)).orElse(UIO.unit).forever
+    _ <- transactionLoop(currencyIdMap)(Seq.empty)
   } yield ()
+
+  private def transactionLoop(currencyIdMap: Map[Int, String])(oldTransactions: Seq[Transaction]): ZIO[ConfigProvider with CurrencyApiZ with Console with Logging, Nothing, Unit]
+  = transaction(currencyIdMap)
+    .map(_.foldLeft(oldTransactions)(_ :+ _))
+    .flatMapError(ex => logError(ex.getMessage))
+    .orElse(UIO.succeed(oldTransactions))
+    .flatMap(transactions => tell(transactions.map(Show[Transaction].show).mkString("\n")) *> UIO.succeed(transactions))
+    .flatMap(ts => transactionLoop(currencyIdMap)(ts))
 
   private def transaction(currencyIdMap: Map[Int, String]) = for {
     currencyIdsFormatted <- ZIO.succeed(currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(","))
@@ -30,10 +39,12 @@ trait Program extends Algebra {
     toCurrency <- safeAsk(value => currencyIdMap(value.toInt))
     _ <- tell(s"You chose $toCurrency")
     rateOpt <- rate(fromCurrency, toCurrency)
-    _ <- rateOpt.map(rate => tell(s"Converted $fromCurrency $amount to $toCurrency at rate $rate")).getOrElse(UIO.unit)
-  } yield ()
+    transaction = rateOpt.map(rate => Transaction(fromCurrency, toCurrency, amount, rate))
+    _ <- transaction.map(t => tell(s"${t.fromCurrency} to ${t.toCurrency} rate = ${t.rate}")) .getOrElse(UIO.unit)
+    transactionZ <- UIO.succeed(transaction)
+  } yield transactionZ
 
-  private def rate(fromCurrency: String, toCurrency: String): TaskR[ConfigProvider with CurrencyApiZ with Console with Logging, Option[BigDecimal]] =
+  private def rate(fromCurrency: String, toCurrency: String) =
     userRetry(exchangeRate(fromCurrency, toCurrency))(ex => s"Couldn't fetch exchange rate - Error = ${ex.getMessage}").flatMap {
       case Some(Right(rate)) => UIO.succeed(rate.some)
       case None => UIO.succeed(none[BigDecimal])
@@ -157,6 +168,12 @@ trait Algebra {
     .flatMapError(ex => logError(s"User entered wrong input - ${ex.getMessage}"))
     .orElse(tell("Wrong input. Please enter again.") *> safeAsk(convert))
 
+  case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
+
+  implicit val showTransaction: Show[Transaction] = new Show[Transaction] {
+    override def show(t: Transaction): String = s"Converted ${t.fromCurrency} ${t.amount} to ${t.toCurrency} at rate ${t.rate}"
+  }
+
 }
 
 object Application extends scalaz.zio.App with Program {
@@ -164,7 +181,7 @@ object Application extends scalaz.zio.App with Program {
     override val console: Application.Console.Service = Console.Live
     override val service: Application.ConfigProvider.Service = ConfigProvider.Live
     override val currencyApi: Application.CurrencyApiZ.Service = CurrencyApiZ.Live
-    override def logging: Application.Logging.Service = Logging.Live
+    override val logging: Application.Logging.Service = Logging.Live
   }
   override def run(args: List[String]): ZIO[Application.Environment, Nothing, Int] = program.provide(liveEnv).fold(_ => 1, _ => 0)
 }
