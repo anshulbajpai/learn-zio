@@ -16,7 +16,7 @@ trait Program extends Algebra {
 
   val program = for {
     currencies <- autoRetry(allCurrencies)(ex => s"Couldn't fetch currencies. Re-fetching again. Error = ${ex.getMessage}")
-    currencyIdMap <- ZIO.succeed(currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap)
+    currencyIdMap = currencies.zipWithIndex.map(_.swap).map(pair => (pair._1 + 1, pair._2)).toMap
     _ <- transactionLoop(currencyIdMap)(Seq.empty)
   } yield ()
 
@@ -29,7 +29,7 @@ trait Program extends Algebra {
     .flatMap(ts => transactionLoop(currencyIdMap)(ts))
 
   private def transaction(currencyIdMap: Map[Int, String]) = for {
-    currencyIdsFormatted <- ZIO.succeed(currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(","))
+    currencyIdsFormatted <- UIO.succeed(currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(","))
     _ <- tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
     fromCurrency <- safeAsk(v => currencyIdMap(v.toInt))
     _ <- tell(s"You chose $fromCurrency")
