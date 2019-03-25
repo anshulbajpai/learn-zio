@@ -3,12 +3,12 @@
 This repo has code examples to understand the advantages of using [ZIO](https://scalaz.github.io/scalaz-zio/) library
 by comparing with the code examples using other libraries and techniques
 
-The order in which the code exmaples should be read is given below:-
+The order in which the code-examples should be read is given below:-
 1. `usingVanillascala` (using plain old scala with Futures and executing side-effects eagerly)
 2. `usingMonads` (using Monads and MonadTransformers with Futures and executing side-effects eagerly)
 3. `usingIO` (using [IO](https://typelevel.org/cats-effect/datatypes/io.html) and pushing side-effects to the boundary)
 4. `usingFinaltagless` (using final tagless technique complimented with [mtl](https://typelevel.org/cats-mtl/))
-5. `usingZIO` (to be implemented) 
+5. `usingZIO` (using the [ZIO](https://scalaz.github.io/scalaz-zio/) library) 
 
 The above mentioned terms represents different packages under source code.
 
