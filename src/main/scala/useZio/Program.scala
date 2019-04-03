@@ -23,8 +23,8 @@ trait Program extends Algebra {
   private def transactionLoop(currencyIdMap: Map[Int, String])(oldTransactions: Seq[Transaction]): ZIO[ConfigProvider with CurrencyApiZ with Console with Logging, Nothing, Unit]
   = transaction(currencyIdMap)
     .map(_.foldLeft(oldTransactions)(_ :+ _))
-    .catchAll(ex => logError(ex.getMessage).const(oldTransactions))
     .flatMap(transactions => tell(transactions.map(Show[Transaction].show).mkString("\n")).const(transactions))
+    .catchAll(ex => logError(ex.getMessage).const(oldTransactions))
     .flatMap(transactionLoop(currencyIdMap))
 
   private def transaction(currencyIdMap: Map[Int, String]): ZIO[ConfigProvider with CurrencyApiZ with Console with Logging, RuntimeException, Option[Transaction]] = for {
