@@ -23,12 +23,11 @@ trait Program extends Algebra {
   private def transactionLoop(currencyIdMap: Map[Int, String])(oldTransactions: Seq[Transaction]): ZIO[ConfigProvider with CurrencyApiZ with Console with Logging, Nothing, Unit]
   = transaction(currencyIdMap)
     .map(_.foldLeft(oldTransactions)(_ :+ _))
-    .flatMapError(ex => logError(ex.getMessage))
-    .orElse(UIO.succeed(oldTransactions))
-    .flatMap(transactions => tell(transactions.map(Show[Transaction].show).mkString("\n")) *> UIO.succeed(transactions))
-    .flatMap(ts => transactionLoop(currencyIdMap)(ts))
+    .catchAll(ex => logError(ex.getMessage).const(oldTransactions))
+    .flatMap(transactions => tell(transactions.map(Show[Transaction].show).mkString("\n")).const(transactions))
+    .flatMap(transactionLoop(currencyIdMap))
 
-  private def transaction(currencyIdMap: Map[Int, String]) = for {
+  private def transaction(currencyIdMap: Map[Int, String]): ZIO[ConfigProvider with CurrencyApiZ with Console with Logging, RuntimeException, Option[Transaction]] = for {
     currencyIdsFormatted <- UIO.succeed(currencyIdMap.map(pair => s"[${pair._1} - ${pair._2}]").mkString(","))
     _ <- tell(s"Choose a currency you want to convert from - $currencyIdsFormatted")
     fromCurrency <- safeAsk(v => currencyIdMap(v.toInt))
@@ -40,9 +39,8 @@ trait Program extends Algebra {
     _ <- tell(s"You chose $toCurrency")
     rateOpt <- rate(fromCurrency, toCurrency)
     transaction = rateOpt.map(rate => Transaction(fromCurrency, toCurrency, amount, rate))
-    _ <- transaction.map(t => tell(s"${t.fromCurrency} to ${t.toCurrency} rate = ${t.rate}")) .getOrElse(UIO.unit)
-    transactionZ <- UIO.succeed(transaction)
-  } yield transactionZ
+    _ <- transaction.map(t => tell(s"${t.fromCurrency} to ${t.toCurrency} rate = ${t.rate}")).getOrElse(UIO.unit)
+  } yield transaction
 
   private def rate(fromCurrency: String, toCurrency: String) =
     userRetry(exchangeRate(fromCurrency, toCurrency))(ex => s"Couldn't fetch exchange rate - Error = ${ex.getMessage}").flatMap {
@@ -150,7 +148,7 @@ trait Algebra {
   }
 
   def autoRetry[R, E, A](zio: ZIO[R, E, A])(errorLog: E => String): ZIO[Logging with R, Nothing, A] =
-    zio.flatMapError(e => logWarn(errorLog(e))).orElse(autoRetry(zio)(errorLog))
+    zio.catchAll(e => logWarn(errorLog(e)) *> autoRetry(zio)(errorLog))
 
   def userRetry[R, E, A](zio: ZIO[R, E, A])(errorLog: E => String): ZIO[R with Console with Logging, Nothing, Option[A]] = {
     val retry = for {
@@ -158,15 +156,14 @@ trait Algebra {
       canRetry <- safeAsk(_.toLowerCase == "y")
       result <- if (canRetry) userRetry(zio)(errorLog) else UIO.succeed(none[A])
     } yield result
-    zio.map(_.some).flatMapError(e => logError(errorLog(e))).orElse(retry)
+    zio.map(_.some).catchAll(e => logError(errorLog(e)) *> retry)
   }
 
   def safeAsk[T](convert: String => T): ZIO[Console with Logging, Nothing, T] = (for {
     stringValue <- ask
     value <- ZIO.fromTry(Try(convert(stringValue)))
   } yield value)
-    .flatMapError(ex => logError(s"User entered wrong input - ${ex.getMessage}"))
-    .orElse(tell("Wrong input. Please enter again.") *> safeAsk(convert))
+    .catchAll(ex => logError(s"User entered wrong input - ${ex.getMessage}") *> tell("Wrong input. Please enter again.") *> safeAsk(convert))
 
   case class Transaction(fromCurrency: String, toCurrency: String, amount: BigDecimal, rate: BigDecimal)
 
